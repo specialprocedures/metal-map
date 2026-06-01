@@ -1,16 +1,14 @@
 # %%
 import json
+import numpy as np
+import regex as re
 import pandas as pd
+import matplotlib.pyplot as plt
+from adjustText import adjust_text
 from sklearn.preprocessing import MultiLabelBinarizer
 from sklearn.feature_extraction.text import TfidfTransformer
-from hdbscan import HDBSCAN
-import matplotlib.pyplot as plt
-
+# from hdbscan import HDBSCAN
 from umap import UMAP
-import regex as re
-import numpy as np
-import networkx as nx
-from sklearn.metrics.pairwise import cosine_similarity
 
 with open("data.json", "r") as f:
     data = json.load(f)
@@ -22,7 +20,6 @@ for item in data:
     artist, album = [i.strip() for i in item["title"].split(" - ", maxsplit=1)]
     item["artist"] = artist
     item["album"] = album
-
     parsed.append(item)
 # %%
 
@@ -60,21 +57,19 @@ mlb = MultiLabelBinarizer()
 styles = pd.DataFrame(
     mlb.fit_transform(df["style"]), columns=mlb.classes_, index=df.index
 )
-style_labels = [i for i in mlb.classes_]
+style_labels = list(mlb.classes_)
 
 top_styles = styles.sum().sort_values(ascending=False).head(100).index
 
 
 df = (
-    (
-        pd.concat([df, styles], axis=1)
-        .groupby(["artist"])[["popularity"] + style_labels]
-        .sum()
-        .merge(artist_counts.rename("artist_count"), left_on="artist", right_index=True)
-    )
+    pd.concat([df, styles], axis=1)
+    .groupby(["artist"])[["popularity"] + style_labels]
+    .sum()
+    .merge(artist_counts.rename("artist_count"), left_on="artist", right_index=True)
     .loc[lambda x: x["artist_count"] > 1]
     .loc[lambda x: x["popularity"] > 2000]
-    .loc[lambda x: x[top_styles].sum(axis=1) > 0]  # sum of styles > 0
+    .loc[lambda x: x[top_styles].sum(axis=1) > 0]
 ).reset_index()
 
 # Drop any Hard Rock with popularity less than 3000
@@ -94,50 +89,66 @@ df["artist"] = df["artist"].apply(lambda x: x.replace("*", "").strip())
 df = df[~df["artist"].str.contains(r"[^\x00-\xFF]", regex=True)]
 # %%
 
-umap_model = UMAP(
-    n_components=2,
-    n_neighbors=250,
-    min_dist=0.22,
-    metric="cosine",
-    random_state=42,
-    densmap=True,  # preserves relative local density
-    repulsion_strength=1.0,  # push outliers back toward the pack
-)
-
-
 tfidf = TfidfTransformer()
 tfidf_matrix = tfidf.fit_transform(df[style_labels])
+
+umap_model = UMAP(
+    n_components=2,
+    n_neighbors=200,
+    min_dist=0.3,
+    metric="cosine",
+    random_state=42,
+    densmap=True,
+    repulsion_strength=1.0,
+)
 
 df[["x", "y"]] = umap_model.fit_transform(tfidf_matrix.toarray())
 
 # %%
+import networkx as nx
+
+G = nx.Graph()
+
+for idx, row in df.iterrows():
+    artist_id = f"artist_{idx}"
+    G.add_node(
+        artist_id, 
+        label=row['artist'], 
+        popularity=row['popularity'], 
+        pop_log=row['pop_log'],
+        artist_count=row['artist_count'],
+        pop_norm=row['pop_norm']
+    )
+
+    for n, style_label in enumerate(style_labels):
+        style_id = f"style_{n}",
+        if style_id not in G.nodes:
+            G.add_node(
+                style_id, label=style_label
+            )
+        
+        if row[style_label] > 0:
+            G.add_edge(
+                style_id, artist_id
+            )
 
 
-clusterer = HDBSCAN(min_cluster_size=30, metric="euclidean")
-df["cluster"] = clusterer.fit_predict(df[["x", "y"]])
 
 # %%
-
-
-# %%
-plt.figure(figsize=(10, 10))
-plt.scatter(
-    df["x"], df["y"], s=df["pop_norm"] * 100, alpha=0.5, c=df["cluster"], cmap="tab10"
-)
-plt.show()
-
-
+nx.write_gexf(G, 'graph.gexf')
 # %%
 
-from adjustText import adjust_text
-
-# Set noto sans font with cjk support
 plt.rcParams["font.family"] = "Noto Sans CJK JP"
+plt.rcParams["svg.fonttype"] = "path"
 
-# Black background
+A2_INCHES = (20, 20)  # square at A2 long-edge; adjust to (16.54, 23.39) for portrait
 
-fig, ax = plt.subplots(figsize=(75, 75))
+fig, ax = plt.subplots(figsize=A2_INCHES)
+fig.patch.set_facecolor("black")
 ax.set_facecolor("black")
+
+
+
 scatter = ax.scatter(
     df["x"],
     df["y"],
@@ -145,10 +156,9 @@ scatter = ax.scatter(
     # s=np.log(df["pop_norm"] + 1) * 20,
     # alpha=df["pop_norm"],
 )
-
 texts = []
 for _, row in df.iterrows():
-    fontsize = 8 + 12 * (np.exp(row["pop_norm"]) - 1) / (np.e - 1)
+    fontsize = 11 # + 2 * (np.exp(row["pop_norm"]) - 1) / (np.e - 1)
     texts.append(
         ax.text(row["x"], row["y"], row["artist"], fontsize=fontsize, color="white")
     )
@@ -160,13 +170,15 @@ ax.set_yticks([])
 
 adjust_text(
     texts,
-    force_text=1.85,
-    force_explode=0.5,
-    max_move=25,
-    avoid_self=False,
+    force_text=0.1,
+    force_explode=0.2,
+    explode_radius=200,
+    force_pull=0.2,
+    max_move=10,
+    # avoid_self=False,
     prevent_crossings=False,
     iter_lim=1000,
 )
 
-fig.savefig("umap_plot.svg", dpi=300, bbox_inches="tight")
+fig.savefig("umap_plot_2.svg", dpi=300, bbox_inches="tight")
 # %%
